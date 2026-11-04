@@ -5228,7 +5228,11 @@ impl<'a, 'db> ArgumentMatcher<'a, 'db> {
             argument_index,
             argument,
             argument_type,
-            InvalidArgumentTypeProvenance::Argument,
+            if variable_argument_length {
+                InvalidArgumentTypeProvenance::UnpackedArgument
+            } else {
+                InvalidArgumentTypeProvenance::Argument
+            },
             parameter_index,
             parameter,
             !parameter.is_variadic(),
@@ -5477,7 +5481,7 @@ impl<'a, 'db> ArgumentMatcher<'a, 'db> {
                     argument_index,
                     Argument::Keywords,
                     Some(value_type),
-                    InvalidArgumentTypeProvenance::Argument,
+                    InvalidArgumentTypeProvenance::UnpackedArgument,
                     parameter_index,
                     parameter,
                     false,
@@ -9471,8 +9475,44 @@ impl<'db> Binding<'db> {
         compound_diag: Option<&dyn CompoundDiagnostic>,
         matching_overload: Option<&MatchingOverloadLiteral<'db>>,
     ) {
+        // A single unpacked `*args` or `**kwargs` argument of unknown length can fail against
+        // many parameters. Report one diagnostic per such argument, naming the other parameters
+        // that also rejected it. As below, this only happens when reporting, so that overload
+        // selection is unaffected.
+        let mut unpacked_argument_errors: FxHashMap<_, SmallVec<[&ParameterContext; 4]>> =
+            FxHashMap::default();
+        for error in &self.errors {
+            if let BindingError::InvalidArgumentType {
+                parameter,
+                argument_index,
+                provenance: InvalidArgumentTypeProvenance::UnpackedArgument,
+                ..
+            } = error
+            {
+                let parameters = unpacked_argument_errors.entry(argument_index).or_default();
+                if !parameters.iter().any(|reported| {
+                    reported.signature_parameter_index == parameter.signature_parameter_index
+                }) {
+                    parameters.push(parameter);
+                }
+            }
+        }
+
         let mut reported_argument_errors: FxHashMap<_, SmallVec<[_; 1]>> = FxHashMap::default();
         for error in &self.errors {
+            let mut unpacked_argument_parameters = SmallVec::new();
+            if let BindingError::InvalidArgumentType {
+                argument_index,
+                provenance: InvalidArgumentTypeProvenance::UnpackedArgument,
+                ..
+            } = error
+            {
+                let Some(parameters) = unpacked_argument_errors.remove(argument_index) else {
+                    continue;
+                };
+                unpacked_argument_parameters = parameters;
+            }
+
             // Multiple elements of one starred argument can produce the same type error for a
             // variadic parameter. Deduplicate only when reporting: overload selection uses the
             // number of binding errors, so removing errors earlier could change inference.
@@ -9492,6 +9532,7 @@ impl<'db> Binding<'db> {
                 compound_diag,
                 matching_overload,
                 self.source_parameter_index_offset,
+                unpacked_argument_parameters.get(1..).unwrap_or_default(),
             );
         }
     }
@@ -9980,6 +10021,10 @@ impl<'db> ForwardedParameterSource<'db> {
 pub(crate) enum InvalidArgumentTypeProvenance {
     Argument,
     OpenTypedDictExtraItems,
+    /// An element or value of an unpacked `*args` or `**kwargs` argument of unknown length, whose
+    /// single type may be checked against many parameters. Errors with this provenance are
+    /// reported as one diagnostic per argument.
+    UnpackedArgument,
 }
 
 /// A statically known combination of arguments that makes a stdlib `dataclass` decorator invalid.
@@ -10298,6 +10343,7 @@ impl<'db> BindingError<'db> {
         compound_diag: Option<&dyn CompoundDiagnostic>,
         matching_overload: Option<&MatchingOverloadLiteral<'_>>,
         source_parameter_index_offset: usize,
+        other_rejecting_parameters: &[&ParameterContext],
     ) {
         let db = context.db();
         let env = context.program_environment();
@@ -10362,9 +10408,33 @@ impl<'db> BindingError<'db> {
                         "Possible extra items in unpacked open `TypedDict` have type \
                          `{provided_ty_display}`, expected `{expected_ty_display}`"
                     ));
-                } else {
+                } else if other_rejecting_parameters.is_empty() {
                     diag.set_primary_annotation_message(format_args!(
                         "Expected `{expected_ty_display}`, found `{provided_ty_display}`"
+                    ));
+                } else {
+                    let count = other_rejecting_parameters.len();
+                    diag.set_primary_annotation_message(format_args!(
+                        "Expected `{expected_ty_display}`, found `{provided_ty_display}` \
+                         (parameter {parameter} and {count} other{s})",
+                        s = if count == 1 { "" } else { "s" },
+                    ));
+                    let mut names = other_rejecting_parameters
+                        .iter()
+                        .take(MAXIMUM_LISTED_PARAMETERS)
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if count > MAXIMUM_LISTED_PARAMETERS {
+                        names.push_str(", ...");
+                    }
+                    diag.info(format_args!(
+                        "The unpacked argument is also not assignable to {parameters}: {names}",
+                        parameters = if count == 1 {
+                            "parameter"
+                        } else {
+                            "parameters"
+                        },
                     ));
                 }
 
@@ -10854,6 +10924,7 @@ impl<'db> BindingError<'db> {
                     compound_diag,
                     matching_overload,
                     source_parameter_index_offset,
+                    &[],
                 );
             }
 
@@ -10866,6 +10937,7 @@ impl<'db> BindingError<'db> {
                     compound_diag,
                     matching_overload,
                     source_parameter_index_offset,
+                    &[],
                 );
             }
 
@@ -10878,6 +10950,7 @@ impl<'db> BindingError<'db> {
                     compound_diag,
                     matching_overload,
                     source_parameter_index_offset,
+                    &[],
                 );
             }
 
@@ -11208,6 +11281,10 @@ impl fmt::Display for FunctionKind {
 // An example of a routine with many many overloads:
 // https://github.com/henribru/google-api-python-client-stubs/blob/master/googleapiclient-stubs/discovery.pyi
 const MAXIMUM_OVERLOADS: usize = 50;
+
+/// When a single unpacked argument is rejected by many parameters, list at most this many of
+/// their names in the diagnostic.
+const MAXIMUM_LISTED_PARAMETERS: usize = 5;
 
 /// Maximum repetition count for struct format specifiers.
 /// Larger counts fall back to `tuple[Unknown, ...]`.
