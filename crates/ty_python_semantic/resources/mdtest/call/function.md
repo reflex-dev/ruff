@@ -621,15 +621,14 @@ pair(**{"z": 3, "x": 1, "y": "two"})  # error: [unknown-argument]
 ### Aliased list arguments
 
 Assigning a list literal to a variable loses the per-position types used for immediate unpacking.
-This call is valid at runtime, but ty currently reports errors because `args` has type
+This call is valid at runtime, but ty currently reports an error because `args` has type
 `list[int | str]`.
 
 ```py
 def pair(x: int, y: str) -> None: ...
 
 args = [1, "two"]
-# error: [invalid-argument-type]
-# error: [invalid-argument-type]
+# error: [invalid-argument-type] "Argument to function `pair` is incorrect: Expected `int`, found `int | str` (parameter `x` and 1 other)"
 pair(*args)
 ```
 
@@ -2279,6 +2278,92 @@ def _(kwargs: dict[str, int]) -> None:
     f(**MappingSubclass())
     # error: [invalid-argument-type] "Argument to function `f` is incorrect: Expected `str`, found `int`"
     f(**MappingProtocol())
+```
+
+### Invalid value type for many parameters
+
+The value type of an unpacked mapping (other than a `TypedDict`) is checked against every parameter
+it could be matched to. If several of these parameters reject it, we report a single diagnostic for
+the unpacked argument rather than one per parameter.
+
+```py
+from dataclasses import dataclass
+
+@dataclass
+class Thing:
+    a: int = 0
+    b: bool = True
+    c: bool = True
+    d: bool = True
+    e: bool = True
+
+kwargs = {"a": 1}
+# snapshot: invalid-argument-type
+Thing(**kwargs)
+```
+
+```snapshot
+error[invalid-argument-type]: Argument is incorrect
+  --> src/mdtest_snippet.py:13:7
+   |
+13 | Thing(**kwargs)
+   |       ^^^^^^^^ Expected `bool`, found `int` (parameter `b` and 3 others)
+info: The unpacked argument is also not assignable to parameters: `c`, `d`, `e`
+```
+
+We list at most five of the other parameters, and report nothing if every parameter accepts the
+value type:
+
+```py
+from typing import Any
+
+def f(*, a: str = "", b: str = "", c: str = "", d: str = "", e: str = "", f: str = "", g: str = ""): ...
+def _(ints: dict[str, int], mixed: dict[str, int | str], strs: dict[str, str], anys: dict[str, Any]):
+    # snapshot: invalid-argument-type
+    f(**ints)
+    # error: [invalid-argument-type] "Argument to function `f` is incorrect: Expected `str`, found `int | str` (parameter `a` and 6 others)"
+    f(**mixed)
+    f(**strs)  # ok
+    f(**anys)  # ok
+    Thing(**anys)  # ok
+```
+
+```snapshot
+error[invalid-argument-type]: Argument to function `f` is incorrect
+  --> src/mdtest_snippet.py:19:7
+   |
+19 |     f(**ints)
+   |       ^^^^^^ Expected `str`, found `int` (parameter `a` and 6 others)
+info: The unpacked argument is also not assignable to parameters: `b`, `c`, `d`, `e`, `f`, ...
+info: Function defined here
+  --> src/mdtest_snippet.py:16:5
+   |
+16 | def f(*, a: str = "", b: str = "", c: str = "", d: str = "", e: str = "", f: str = "", g: str = ""): ...
+   |     ^    ----------- Parameter declared here
+```
+
+The same applies to an unpacked iterable of unknown length:
+
+```py
+def g(a: str, b: str, *args: str) -> None: ...
+def _(ints: list[int], strs: list[str]):
+    # snapshot: invalid-argument-type
+    g(*ints)
+    g(*strs)  # ok
+```
+
+```snapshot
+error[invalid-argument-type]: Argument to function `g` is incorrect
+  --> src/mdtest_snippet.py:28:7
+   |
+28 |     g(*ints)
+   |       ^^^^^ Expected `str`, found `int` (parameter `a` and 2 others)
+info: The unpacked argument is also not assignable to parameters: `b`, `*args`
+info: Function defined here
+  --> src/mdtest_snippet.py:25:5
+   |
+25 | def g(a: str, b: str, *args: str) -> None: ...
+   |     ^ ------ Parameter declared here
 ```
 
 ### `Unknown` type
