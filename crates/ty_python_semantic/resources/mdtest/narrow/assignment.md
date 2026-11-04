@@ -141,11 +141,93 @@ reveal_type(a.b.c1.d)  # revealed: D | None
 reveal_type(a.b.c2.d)  # revealed: D | None
 ```
 
-### Do not narrow the type of a `property` by assignment
+### Symmetric properties
+
+A property whose setter accepts exactly the type returned by its getter is considered safe to narrow
+on assignment, as in pyright and mypy:
 
 ```py
 class C:
-    def __init__(self):
+    def __init__(self) -> None:
+        self._x: int | None = None
+
+    @property
+    def x(self) -> int | None:
+        return self._x
+
+    @x.setter
+    def x(self, value: int | None) -> None:
+        self._x = value
+
+def f(c: C) -> None:
+    c.x = 1
+    reveal_type(c.x)  # revealed: Literal[1]
+
+    c.x = None
+    reveal_type(c.x)  # revealed: None
+```
+
+As with other attributes, the narrowing is discarded when the object is rebound, and an invalid
+assignment falls back to the getter's return type:
+
+```py
+def g(c: C, other: C) -> None:
+    c.x = 1
+    c = other
+    reveal_type(c.x)  # revealed: int | None
+
+    c.x = 1
+    c.x = "a"  # error: [invalid-assignment]
+    reveal_type(c.x)  # revealed: int | None
+```
+
+Method calls do not discard the narrowing, matching the behavior for plain attributes:
+
+```py
+class D:
+    plain: int | None = None
+
+    @property
+    def x(self) -> int | None:
+        return None
+
+    @x.setter
+    def x(self, value: int | None) -> None: ...
+    def reset(self) -> None: ...
+
+def k(d: D, flag: bool) -> None:
+    d.plain = 1
+    d.x = 1
+    d.reset()
+    reveal_type(d.plain)  # revealed: Literal[1]
+    reveal_type(d.x)  # revealed: Literal[1]
+
+    if flag:
+        d.x = None
+    reveal_type(d.x)  # revealed: Literal[1] | None
+```
+
+A property without a setter cannot be assigned, so it is never narrowed:
+
+```py
+class ReadOnly:
+    @property
+    def x(self) -> int | None:
+        return None
+
+def h(r: ReadOnly) -> None:
+    r.x = 1  # error: [invalid-assignment]
+    reveal_type(r.x)  # revealed: int | None
+```
+
+### Asymmetric properties
+
+A setter that accepts a wider type than the getter returns may convert the assigned value, so we do
+not narrow:
+
+```py
+class C:
+    def __init__(self) -> None:
         self._x: int = 0
 
     @property
@@ -153,32 +235,113 @@ class C:
         return self._x
 
     @x.setter
-    def x(self, value: int) -> None:
-        self._x = abs(value)
+    def x(self, value: int | str) -> None:
+        self._x = int(value)
 
-c = C()
-c.x = -1
-# Don't infer `c.x` to be `Literal[-1]`
-reveal_type(c.x)  # revealed: int
+def f(c: C) -> None:
+    c.x = "1"
+    reveal_type(c.x)  # revealed: int
 ```
 
-### Do not narrow the type of a descriptor by assignment
+### Symmetric descriptors
+
+The same applies to data descriptors whose `__set__` value parameter has the same type as the
+instance-access return type of `__get__`. This includes generic descriptors that are specialized by
+the attribute's declaration:
 
 ```py
+from typing import Any, Generic, TypeVar, overload
+
+T = TypeVar("T")
+
+class Field(Generic[T]):
+    @overload
+    def __get__(self, instance: None, owner: Any) -> "Field[T]": ...
+    @overload
+    def __get__(self, instance: object, owner: Any) -> T: ...
+    def __get__(self, instance: object, owner: Any) -> "Field[T] | T":
+        raise NotImplementedError
+
+    def __set__(self, instance: object, value: T) -> None: ...
+
+class Thread:
+    id: int
+
+class C:
+    thread: Field[Thread | None] = Field()
+
+    def f(self) -> int:
+        self.thread = Thread()
+        reveal_type(self.thread)  # revealed: Thread
+        return self.thread.id
+
+def f(c: C) -> None:
+    c.thread = None
+    reveal_type(c.thread)  # revealed: None
+```
+
+### Asymmetric descriptors
+
+If `__set__` accepts a different type than `__get__` returns, the descriptor may transform the
+assigned value, so we do not narrow:
+
+```toml
+[environment]
+python-version = "3.11"
+```
+
+```py
+from typing import Never
+
 class Descriptor:
     def __get__(self, instance: object, owner: type) -> int:
         return 1
 
-    def __set__(self, instance: object, value: int) -> None:
+    def __set__(self, instance: object, value: int | str) -> None:
+        pass
+
+class NeverDescriptor:
+    def __get__(self, instance: object, owner: type) -> int:
+        return 1
+
+    def __set__(self, instance: object, value: Never) -> None:
         pass
 
 class C:
     desc: Descriptor = Descriptor()
+    never: NeverDescriptor = NeverDescriptor()
 
-c = C()
-c.desc = -1
-# Don't infer `c.desc` to be `Literal[-1]`
-reveal_type(c.desc)  # revealed: int
+def f(c: C) -> None:
+    c.desc = -1
+    reveal_type(c.desc)  # revealed: int
+
+    c.never = 1  # error: [invalid-assignment]
+    reveal_type(c.never)  # revealed: int
+```
+
+We also do not narrow when the setter is overloaded, since each overload may store the value
+differently:
+
+```py
+from typing import overload
+
+class OverloadedDescriptor:
+    def __get__(self, instance: object, owner: type) -> int | str:
+        return 1
+
+    @overload
+    def __set__(self, instance: object, value: int) -> None: ...
+    @overload
+    def __set__(self, instance: object, value: str) -> None: ...
+    def __set__(self, instance: object, value: int | str) -> None:
+        pass
+
+class D:
+    desc: OverloadedDescriptor = OverloadedDescriptor()
+
+def g(d: D) -> None:
+    d.desc = 1
+    reveal_type(d.desc)  # revealed: int | str
 ```
 
 ### Dynamic attributes

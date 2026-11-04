@@ -1207,6 +1207,77 @@ pub(super) fn descriptor_setter_domain<'db>(
     }
 }
 
+/// Returns whether `descriptor_ty` is a symmetric data descriptor for writes to
+/// `receiver_ty.attribute`: its setter accepts exactly the type that reading the attribute returns.
+///
+/// Like pyright and mypy, we consider assignments through symmetric descriptors (including
+/// properties) safe to narrow, while asymmetric descriptors may transform the assigned value.
+/// We conservatively return `false` whenever symmetry cannot be determined, e.g. for unions of
+/// descriptors or overloaded setters.
+///
+/// ```python
+/// class C:
+///     @property
+///     def x(self) -> int | None: ...
+///     @x.setter
+///     def x(self, value: int | None) -> None: ...  # symmetric
+/// ```
+pub(super) fn is_symmetric_data_descriptor<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    descriptor_ty: Type<'db>,
+    receiver_ty: Type<'db>,
+    attribute: &str,
+) -> bool {
+    let setter_ty = match descriptor_ty {
+        Type::PropertyInstance(property) => {
+            let Some(setter_ty) = property.setter(db) else {
+                return false;
+            };
+            setter_ty
+        }
+        Type::NominalInstance(_) => {
+            let Place::Defined(DefinedPlace {
+                ty: setter_ty,
+                definedness: Definedness::AlwaysDefined,
+                ..
+            }) = descriptor_setter(db, env, descriptor_ty)
+            else {
+                return false;
+            };
+            setter_ty
+        }
+        _ => return false,
+    };
+    let Some(callables) = setter_ty.try_upcast_to_callable(db, env) else {
+        return false;
+    };
+    if callables.iter().len() != 1
+        || callables
+            .iter()
+            .any(|callable| callable.signatures(db).iter().len() != 1)
+    {
+        return false;
+    }
+    let DescriptorSetterDomain::Known(write_ty) =
+        descriptor_setter_domain(db, env, descriptor_ty, receiver_ty)
+    else {
+        return false;
+    };
+    if write_ty.is_never() {
+        return false;
+    }
+    let Place::Defined(DefinedPlace {
+        ty: read_ty,
+        definedness: Definedness::AlwaysDefined,
+        ..
+    }) = receiver_ty.member(db, env, attribute).place
+    else {
+        return false;
+    };
+    read_ty.is_equivalent_to(db, env, write_ty)
+}
+
 /// Derive the values accepted by one possible runtime descriptor.
 fn single_descriptor_setter_domain<'db>(
     db: &'db dyn Db,

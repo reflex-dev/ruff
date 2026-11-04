@@ -2578,8 +2578,9 @@ def fully_static_property(
 ### Assignment narrowing of materialized properties
 
 A materialized protocol exposes a property's return type, not the underlying descriptor, when
-reading that property. Assignment narrowing must still recover the descriptor: its setter can
-transform the assigned value, so the next read must not narrow to the assigned literal.
+reading that property. Assignment narrowing must still recover the descriptor: its setter accepts a
+wider type than its getter returns, so it can transform the assigned value, and the next read must
+not narrow to the assigned literal.
 
 ```py
 from typing import Any, Protocol
@@ -2591,7 +2592,7 @@ class TransformingProperty(Protocol):
     @property
     def value(self) -> int: ...
     @value.setter
-    def value(self, value: int) -> None: ...
+    def value(self, value: int | str) -> None: ...
 
 def materialized_property_assignment_narrowing(
     top: Top[TransformingProperty],
