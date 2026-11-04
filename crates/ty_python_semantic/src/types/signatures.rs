@@ -4591,6 +4591,33 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                                 ) {
                                     return result;
                                 }
+
+                                // If the source signature is generic, its type parameters are
+                                // existentially quantified away once this comparison completes,
+                                // which also removes the constraint above and with it the length
+                                // of the captured tuple. Also constrain the TypeVarTuple by the
+                                // captured tuple with the source's own type parameters replaced
+                                // by `Unknown`. That bound is implied by the one above, but does
+                                // not mention any quantified typevars, so it survives.
+                                if self.relation.is_assignability()
+                                    && let Some(source_context) = source.generic_context
+                                {
+                                    let erased_tuple = inferred_tuple.apply_specialization(
+                                        db,
+                                        source_context.unknown_specialization(db, None),
+                                    );
+                                    if erased_tuple != inferred_tuple
+                                        && !check_types(
+                                            &mut result,
+                                            target_param.annotated_type(),
+                                            erased_tuple,
+                                            target_param.name(),
+                                            target_index,
+                                        )
+                                    {
+                                        return result;
+                                    }
+                                }
                                 target_index += 1;
 
                                 if source_parameters.is_gradual() {
