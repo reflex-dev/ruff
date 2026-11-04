@@ -72,8 +72,8 @@ use crate::use_def::{
     UseDefMapBuilder, UseDefMapInterner,
 };
 use crate::{
-    AncestorsIter, DefinitionsByNode, EvaluationMode, ExpressionsScopeMap, LoopHeader,
-    LoopHeaderId, NarrowingAliasPredicate, PossiblyNarrowedPlaces, SemanticIndex,
+    AncestorsIter, DefinitionsByNode, DescendantsIter, EvaluationMode, ExpressionsScopeMap,
+    LoopHeader, LoopHeaderId, NarrowingAliasPredicate, PossiblyNarrowedPlaces, SemanticIndex,
 };
 use crate::{Db, Statement, StatementNodeKey};
 
@@ -601,7 +601,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
         }
     }
 
-    fn bound_scope(&self, enclosing_scope: FileScopeId, symbol: &Symbol) -> Option<FileScopeId> {
+    fn bound_scope(&self, enclosing_scope: FileScopeId, name: &Name) -> Option<FileScopeId> {
         self.scope_stack
             .iter()
             .rev()
@@ -609,7 +609,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
             .find_map(|scope_info| {
                 let scope_id = scope_info.file_scope_id;
                 let place_table = &self.place_tables[scope_id];
-                let place_id = place_table.symbol_id(symbol.name())?;
+                let place_id = place_table.symbol_id(name)?;
                 place_table.place(place_id).is_bound().then_some(scope_id)
             })
     }
@@ -722,13 +722,36 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
 
     // Records snapshots of the place states visible from the current lazy scope.
     fn record_lazy_snapshots(&mut self, popped_scope_id: FileScopeId) {
+        // Uses in eager scopes nested in the popped scope (e.g. a comprehension in a function
+        // body) see the enclosing scopes through the popped scope, so they share its lazy
+        // snapshots (see `SemanticIndex::enclosing_snapshot`). Collect their symbols too.
+        let mut nested_symbols: Vec<Name> = self.place_tables[popped_scope_id]
+            .symbols()
+            .map(|symbol| symbol.name().clone())
+            .collect();
+        let mut seen: FxHashSet<Name> = nested_symbols.iter().cloned().collect();
+        for (descendant_id, _) in DescendantsIter::new(&self.scopes, popped_scope_id) {
+            let is_eagerly_nested = std::iter::successors(Some(descendant_id), |&scope_id| {
+                self.scopes[scope_id].parent()
+            })
+            .take_while(|&scope_id| scope_id != popped_scope_id)
+            .all(|scope_id| self.scopes[scope_id].is_eager());
+            if is_eagerly_nested {
+                for symbol in self.place_tables[descendant_id].symbols() {
+                    if seen.insert(symbol.name().clone()) {
+                        nested_symbols.push(symbol.name().clone());
+                    }
+                }
+            }
+        }
+
         for enclosing_scope_info in self.scope_stack.iter().rev() {
             let enclosing_scope_id = enclosing_scope_info.file_scope_id;
             let enclosing_scope_kind = self.scopes[enclosing_scope_id].kind();
             let enclosing_place_table = &self.place_tables[enclosing_scope_id];
 
             // We don't record lazy snapshots of attributes or subscripts, because these are difficult to track as they modify.
-            for nested_symbol in self.place_tables[popped_scope_id].symbols() {
+            for nested_symbol in &nested_symbols {
                 // For the same reason, we don't snapshot bindings owned by `global`/`nonlocal`
                 // forwarding declarations here; `snapshot_enclosing_state` stores only a
                 // constraint for those symbols. Also, if the enclosing scope allows its members to
@@ -742,8 +765,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                 // Note that even if this place is bound in the popped scope,
                 // it may refer to the enclosing scope bindings
                 // so we also need to snapshot the bindings of the enclosing scope.
-                let Some(enclosed_symbol_id) =
-                    enclosing_place_table.symbol_id(nested_symbol.name())
+                let Some(enclosed_symbol_id) = enclosing_place_table.symbol_id(nested_symbol)
                 else {
                     continue;
                 };

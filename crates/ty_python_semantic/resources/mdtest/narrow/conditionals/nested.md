@@ -286,6 +286,75 @@ def f(const: str | None):
                 reveal_type(const)  # revealed: str
 ```
 
+The same applies to eager scopes (comprehensions and generator expressions) nested inside the lazy
+scope: they see the enclosing scope through it.
+
+```py
+def f(const: str | None):
+    if const is not None:
+        def _():
+            [reveal_type(const) for _ in range(1)]  # revealed: str
+            any(reveal_type(const) for _ in range(1))  # revealed: str
+            any(True for _ in range(1) if len(reveal_type(const)))  # revealed: str
+            [[reveal_type(const) for _ in range(1)] for _ in range(1)]  # revealed: str
+
+            class C:
+                [reveal_type(const) for _ in range(1)]  # revealed: str
+
+        lambda: [reveal_type(const) for _ in range(1)]  # revealed: str
+
+def f(x: str | None):
+    if x is None:
+        return
+    x = x.strip() or None
+    if x is None:
+        return
+
+    def _():
+        # Reassignments before the function definition don't invalidate the narrowing.
+        [reveal_type(x) for _ in range(1)]  # revealed: str & ~AlwaysFalsy
+```
+
+But such uses are subject to the same invalidation as uses directly in the lazy scope.
+
+```py
+def f(x: str | None):
+    if x is not None:
+        def _():
+            [reveal_type(x) for _ in range(1)]  # revealed: str | None
+            any(reveal_type(x) for _ in range(1))  # revealed: str | None
+
+    x = None
+
+def f(non_local: str | None):
+    if non_local is not None:
+        def _():
+            nonlocal non_local
+            non_local = None
+
+        def _():
+            [reveal_type(non_local) for _ in range(1)]  # revealed: str | None
+
+def f(x: str | None):
+    if x is not None:
+        def _():
+            # The comprehension variable shadows the outer `x`.
+            [reveal_type(x) for x in [None]]  # revealed: None
+
+        def _(x: int | None):
+            [reveal_type(x) for _ in range(1)]  # revealed: int | None
+
+        def _():
+            # A lambda nested in the comprehension is a lazy scope of its own.
+            [lambda: reveal_type(x) for _ in range(1)]  # revealed: str
+
+def f(x: str | None):
+    if x is not None:
+        def _():
+            [lambda: reveal_type(x) for _ in range(1)]  # revealed: str | None
+    x = None
+```
+
 And even if there is an attribute or subscript assignment to the variable, narrowing of the variable
 is still valid in the inner lazy scope.
 
