@@ -1020,7 +1020,12 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                 .members(db)
                 .sorted_by_cached_key(|member| member.structural_member_priority(db, env))
                 .when_all(db, self.constraints, |member| {
-                    self.type_satisfies_protocol_member(db, ty, &member)
+                    self.type_satisfies_protocol_member(
+                        db,
+                        ty,
+                        &member,
+                        Some(Type::ProtocolInstance(protocol)),
+                    )
                 })
         };
         if let Some(context) = self.report_context()
@@ -1143,7 +1148,12 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
             finite_members
                 .iter()
                 .when_all(db, self.constraints, |(_, member)| {
-                    self.type_satisfies_protocol_member(db, ty, member)
+                    self.type_satisfies_protocol_member(
+                        db,
+                        ty,
+                        member,
+                        Some(Type::ProtocolInstance(protocol)),
+                    )
                 });
         for (_, member) in recursive_members {
             if structurally_satisfied
@@ -1153,7 +1163,12 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                 break;
             }
             structurally_satisfied = structurally_satisfied.and(db, self.constraints, || {
-                self.type_satisfies_protocol_member(db, ty, member)
+                self.type_satisfies_protocol_member(
+                    db,
+                    ty,
+                    member,
+                    Some(Type::ProtocolInstance(protocol)),
+                )
             });
         }
 

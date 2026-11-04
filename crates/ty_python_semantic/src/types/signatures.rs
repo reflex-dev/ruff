@@ -1765,7 +1765,7 @@ impl<'db> Signature<'db> {
     ///
     /// This is used to prune impossible overloads when a method is bound to a concrete receiver.
     /// If a signature has no positional first parameter, we conservatively keep it.
-    fn can_bind_self_to(
+    pub(super) fn can_bind_self_to(
         &self,
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
@@ -1819,6 +1819,39 @@ impl<'db> Signature<'db> {
                 return true;
             }
         }
+
+        // A protocol's type parameters may appear only in receiver annotations, as in:
+        //
+        // ```python
+        // class Callback(Protocol[*Ts]):
+        //     @overload
+        //     def __call__(self: "Callback[()]") -> None: ...
+        //     @overload
+        //     def __call__(self: "Callback[int]", value: int, /) -> None: ...
+        // ```
+        //
+        // All specializations of such a protocol have the same structural interface, so they
+        // would all be assignable to each other. Compare specializations of the same protocol
+        // class nominally instead, so that the type arguments select the overloads.
+        let (self_type, expected_self_ty) = if let Some(self_protocol) =
+            self_type.as_protocol_instance()
+            && let Some(expected_protocol) = expected_self_ty
+                .resolve_type_alias(db)
+                .as_protocol_instance()
+            && self_protocol.materialization_kind(db).is_none()
+            && expected_protocol.materialization_kind(db).is_none()
+            && let Some(self_nominal) = self_protocol.nominal_origin_instance(db)
+            && let Some(expected_nominal) = expected_protocol.nominal_origin_instance(db)
+            && self_nominal.class(db, env).class_literal(db)
+                == expected_nominal.class(db, env).class_literal(db)
+        {
+            (
+                Type::NominalInstance(self_nominal),
+                Type::NominalInstance(expected_nominal),
+            )
+        } else {
+            (self_type, expected_self_ty)
+        };
 
         let constraints = ConstraintSetBuilder::new();
         let inferable = self.inferable_typevars(db);
