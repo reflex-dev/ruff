@@ -2930,6 +2930,15 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                         && matches!(ty, Type::LiteralValue(_))
                     {
                         fallback_ty
+                    } else if required.mode == ProtocolMemberAccessMode::Instance
+                        && let Type::BoundMethod(method) = ty
+                    {
+                        // `types.MethodType` re-exports the attributes of the function it wraps
+                        // (`__code__`, `__defaults__`, ...) as read-only properties, so no bound
+                        // method would satisfy a callback protocol declaring one of them as a
+                        // plain attribute, e.g. `__code__: CodeType`. Like mypy and pyright,
+                        // which accept such assignments, check writes against `__func__`.
+                        method.func(db)
                     } else {
                         receiver_ty
                     };
