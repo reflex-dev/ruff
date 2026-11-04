@@ -50,7 +50,9 @@ use crate::reachability::{
 };
 use crate::types::abstract_methods::AbstractMethods;
 use crate::types::add_inferred_python_version_hint_to_diagnostic;
-use crate::types::attribute_write::{AssignmentAttributeMembers, assignment_attribute_members};
+use crate::types::attribute_write::{
+    AssignmentAttributeMembers, assignment_attribute_members, is_symmetric_data_descriptor,
+};
 use crate::types::call::bind::{
     ArgumentContextSpecialization, ArgumentTypeContext, CallableDescription, CheckTypesMode,
     OverloadSet, inferable_typevar_occurrences, requires_overload_evaluation,
@@ -13643,13 +13645,17 @@ impl<'db, 'ast> AddBinding<'db, 'ast> {
             };
 
             // Arbitrary data descriptors can transform the assigned value, but slot descriptors
-            // write it directly into instance storage.
+            // write it directly into instance storage. Like pyright and mypy, we also narrow
+            // through symmetric data descriptors and properties, whose setter accepts exactly
+            // the type that their getter returns (astral-sh/ty#628).
             if uses_getattr
                 || assignment_attribute_members(db, env, value_ty, &attr.id)
                     .and_then(AssignmentAttributeMembers::type_member)
                     .and_then(|member| member.place.ignore_possibly_undefined())
                     .is_some_and(|ty| {
-                        ty.may_be_data_descriptor(db, env) && !matches!(ty, Type::SlotDescriptor(_))
+                        ty.may_be_data_descriptor(db, env)
+                            && !matches!(ty, Type::SlotDescriptor(_))
+                            && !is_symmetric_data_descriptor(db, env, ty, value_ty, &attr.id)
                     })
             {
                 builder.discard_dict_key_assignments_for(self.binding);
