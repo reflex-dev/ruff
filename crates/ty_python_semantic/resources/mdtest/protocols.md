@@ -6919,6 +6919,94 @@ def callback() -> None: ...
 reveal_type(get_name(callback))  # revealed: str
 ```
 
+## Bound methods and mutable function-attribute protocol members
+
+A callback protocol can declare a function attribute such as `__code__` as a mutable attribute.
+Functions declare these attributes as plain attributes, so they satisfy such a protocol. In
+typeshed, `types.MethodType` exposes the attributes of the function it wraps as read-only
+properties. Like mypy and pyright, we check the writes required by such a protocol member against
+the wrapped function, so that a bound method satisfies the same callback protocols as a function:
+
+```py
+import types
+from typing import Any, Protocol
+
+class CodeCallback(Protocol):
+    __code__: types.CodeType
+
+    def __call__(self, value: int, /) -> Any: ...
+
+class C:
+    def method(self, value: int = 0) -> None: ...
+    def no_value(self) -> None: ...
+    def wrong_value(self, value: str) -> None: ...
+
+def function(value: int) -> None: ...
+
+ok_function: CodeCallback = function  # ok
+ok_method: CodeCallback = C().method  # ok
+```
+
+The `__call__` signature and the type of the attribute are still checked:
+
+```py
+bad_signature: CodeCallback = C().no_value  # error: [invalid-assignment]
+bad_parameter: CodeCallback = C().wrong_value  # error: [invalid-assignment]
+
+class NameCallback(Protocol):
+    __name__: int
+
+    def __call__(self) -> Any: ...
+
+bad_name: NameCallback = C().no_value  # error: [invalid-assignment]
+```
+
+A protocol attribute that the wrapped function does not provide is not satisfied, and neither is a
+`types.MethodType` instance whose wrapped function is unknown, because its `__code__` is read-only:
+
+```py
+class ExtraCallback(Protocol):
+    extra: int
+
+    def __call__(self) -> Any: ...
+
+class HasCode(Protocol):
+    __code__: types.CodeType
+
+missing: ExtraCallback = C().no_value  # error: [invalid-assignment]
+
+def _(method: types.MethodType):
+    read_only: HasCode = method  # error: [invalid-assignment]
+```
+
+The same applies to a callback protocol that selects its `__call__` overloads by explicit receiver
+annotations:
+
+```py
+from typing import TypeVar, overload
+from typing_extensions import TypeVarTuple, Unpack
+
+Ts = TypeVarTuple("Ts")
+V = TypeVar("V")
+
+class Callback(Protocol[Unpack[Ts]]):
+    __code__: types.CodeType
+
+    @overload
+    def __call__(self: "Callback[()]") -> Any: ...
+    @overload
+    def __call__(self: "Callback[V]", value: V, /) -> Any: ...
+    def __call__(self, *args: Any) -> Any: ...
+
+class Setter:
+    def set_value(self, value: Any = None) -> None: ...
+    def set_required(self, value: int) -> None: ...
+
+no_args: Callback[()] = Setter().set_value  # ok
+one_arg: Callback[bool] = Setter().set_value  # ok
+missing_arg: Callback[()] = Setter().set_required  # error: [invalid-assignment]
+```
+
 ## Generic protocols and union arguments
 
 When a union is passed to a parameter annotated as a generic protocol, each union element can
