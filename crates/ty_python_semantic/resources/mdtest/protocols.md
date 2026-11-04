@@ -5273,6 +5273,65 @@ static_assert(not is_assignable_to(Source[str], IntSource))
 static_assert(not is_subtype_of(Source[str], IntSource))
 ```
 
+## Callback protocols with overloads selected by explicit receivers
+
+A callback protocol can use explicit `self` annotations to select which `__call__` overloads apply
+to each specialization of the protocol. When checking a callable against a specialization, we only
+require the overloads whose receiver annotation accepts that specialization
+([#4098](https://github.com/astral-sh/ty/issues/4098)):
+
+```toml
+[environment]
+python-version = "3.12"
+```
+
+```py
+from typing import Any, Protocol, TypeVar, TypeVarTuple, Unpack, overload
+
+Ts = TypeVarTuple("Ts")
+V = TypeVar("V")
+
+class Callback(Protocol[Unpack[Ts]]):
+    @overload
+    def __call__(self: "Callback[()]") -> Any: ...
+    @overload
+    def __call__(self: "Callback[V]", value: V, /) -> Any: ...
+    def __call__(self, *args: Any) -> Any: ...
+
+def takes_no_arguments(callback: Callback[()] | None) -> None: ...
+def takes_one_argument(callback: Callback[str]) -> None: ...
+
+takes_no_arguments(lambda: "x")  # ok
+takes_one_argument(lambda value: value)  # ok
+```
+
+A callable that does not match any of the selected overloads is still rejected:
+
+```py
+takes_no_arguments(lambda value: value)  # error: [invalid-argument-type]
+takes_one_argument(lambda: 1)  # error: [invalid-argument-type]
+```
+
+The same applies when the overloads are selected by concrete receiver annotations:
+
+```py
+class Value: ...
+
+class ValueCallback(Protocol[Unpack[Ts]]):
+    @overload
+    def __call__(self: "ValueCallback[()]") -> Any: ...
+    @overload
+    def __call__(self: "ValueCallback[Value]", value: Value, /) -> Any: ...
+    def __call__(self, *args: Any) -> Any: ...
+
+def f(value: Value) -> None: ...
+def g() -> None: ...
+
+no_arguments: ValueCallback[()] = g  # ok
+one_argument: ValueCallback[Value] = f  # ok
+wrong_arguments: ValueCallback[()] = f  # error: [invalid-assignment]
+```
+
 ## `Self` in generic type aliases during protocol matching
 
 `Self` in a protocol method's return type refers to the structural implementation, even when it is

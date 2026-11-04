@@ -2656,6 +2656,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         receiver_ty: Type<'db>,
         member: &ProtocolMember<'_, 'db>,
         required: ProtocolMemberAccess<'_, 'db>,
+        protocol: Option<Type<'db>>,
     ) -> ConstraintSet<'db, 'c> {
         let env = self.env;
         // Reading a member as `object` imposes no constraint on the type read. A class
@@ -2756,6 +2757,30 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         else {
             return self.never();
         };
+
+        // A method bound to an instance of the protocol only exposes the overloads whose explicit
+        // receiver annotation accepts that instance. For example, when checking against
+        // `Callback[str]`, an overload declared with `self: "Callback[()]"` imposes no
+        // requirement on the implementation, and one declared with `self: "Callback[T]"` is
+        // specialized with `T = str`. If no overload accepts the instance, keep them all.
+        let required_callable = if required.mode == ProtocolMemberAccessMode::Instance
+            && let Some(protocol) = protocol
+            && let Some(unbound) = required.unbound_instance_method(db)
+            && unbound
+                .iter()
+                .any(|signature| signature.can_bind_self_to(db, env, protocol))
+            && !unbound
+                .iter()
+                .all(|signature| signature.can_bind_self_to(db, env, protocol))
+        {
+            required_callable.with_signatures(
+                db,
+                unbound.bind_method_receiver(db, env, protocol, protocol_self_binding_ty),
+            )
+        } else {
+            required_callable
+        };
+
         if required.mode == ProtocolMemberAccessMode::Instance {
             attribute_type
                 .try_upcast_to_callable_with_policy(db, env, UpcastPolicy::from(self.relation))
@@ -2849,6 +2874,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         receiver_ty: Type<'db>,
         member: &ProtocolMember<'_, 'db>,
         required: Option<ProtocolMemberAccess<'_, 'db>>,
+        protocol: Option<Type<'db>>,
     ) -> ConstraintSet<'db, 'c> {
         let Some(required) = required else {
             return self.always();
@@ -2889,7 +2915,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         }
 
         let read_result = if required.read().is_some() {
-            self.check_protocol_member_read(db, ty, receiver_ty, member, required)
+            self.check_protocol_member_read(db, ty, receiver_ty, member, required, protocol)
         } else {
             self.always()
         };
@@ -2931,11 +2957,15 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
     }
 
     /// Return `true` if `ty` provides every access required by this protocol member.
+    ///
+    /// `protocol` is the protocol instance type declaring `member`, if known. It is used to
+    /// select the overloads of a method member whose explicit receiver annotation accepts it.
     pub(super) fn type_satisfies_protocol_member(
         &self,
         db: &'db dyn Db,
         ty: Type<'db>,
         member: &ProtocolMember<'_, 'db>,
+        protocol: Option<Type<'db>>,
     ) -> ConstraintSet<'db, 'c> {
         let env = self.env;
         let instance_access = member.implementation_access(ty, ProtocolMemberAccessMode::Instance);
@@ -2992,7 +3022,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         }
 
         let result = self
-            .type_satisfies_protocol_member_access(db, ty, ty, member, instance_access)
+            .type_satisfies_protocol_member_access(db, ty, ty, member, instance_access, protocol)
             .and(db, self.constraints, || {
                 let class_access =
                     member.implementation_access(ty, ProtocolMemberAccessMode::Class);
@@ -3002,6 +3032,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                     ty.to_meta_type(db, env),
                     member,
                     class_access,
+                    protocol,
                 )
             });
         if let Some(context) = self.report_context()
@@ -3038,7 +3069,14 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                 }
 
                 let result = if member.is_method() {
-                    self.check_protocol_member_read(db, instance_ty, meta_ty, &member, required)
+                    self.check_protocol_member_read(
+                        db,
+                        instance_ty,
+                        meta_ty,
+                        &member,
+                        required,
+                        None,
+                    )
                 } else {
                     self.type_satisfies_protocol_member_access(
                         db,
@@ -3046,6 +3084,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                         meta_ty,
                         &member,
                         Some(required),
+                        None,
                     )
                 };
 
@@ -3195,7 +3234,12 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                 if source_member.is_none()
                     && source.includes_member_or_object_fallback(db, env, target_member.name)
                 {
-                    return self.type_satisfies_protocol_member(db, source_type, &target_member);
+                    return self.type_satisfies_protocol_member(
+                        db,
+                        source_type,
+                        &target_member,
+                        None,
+                    );
                 }
 
                 if let Some(context) = self.report_context()
