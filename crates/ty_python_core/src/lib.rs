@@ -818,6 +818,9 @@ impl<'db> SemanticIndex<'db> {
                 break;
             }
             if !ancestor_scope.is_eager() {
+                // The lazy snapshot is recorded for the innermost lazy scope between `nested_scope`
+                // and `enclosing_scope` (which may be `nested_scope` itself); eager scopes nested
+                // inside it (e.g. comprehensions) see the enclosing scope through it.
                 if let PlaceExprRef::Symbol(symbol) = expr
                     && let Some(place_id) =
                         self.place_tables[enclosing_scope].symbol_id(symbol.name())
@@ -825,7 +828,7 @@ impl<'db> SemanticIndex<'db> {
                     let key = EnclosingSnapshotKey {
                         enclosing_scope,
                         enclosing_place: place_id.into(),
-                        nested_scope,
+                        nested_scope: ancestor_scope_id,
                         nested_laziness: ScopeLaziness::Lazy,
                     };
                     if let Some(id) = self.enclosing_snapshots.get(&key) {
