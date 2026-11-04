@@ -1612,6 +1612,60 @@ reveal_type(infer_positional(optional_keyword_only))  # revealed: tuple[int, str
 reveal_type(infer_positional(extra_keywords))  # revealed: tuple[int, str]
 ```
 
+### Callable inference from generic callables
+
+When the argument is itself generic, the `TypeVarTuple` still captures one element per positional
+parameter. The argument's own type parameters are not solved by this inference, so they are
+replaced with `Unknown`.
+
+```py
+from typing import Callable, Protocol
+
+def infer_positional[*Ts](callback: Callable[[*Ts], object]) -> tuple[*Ts]:
+    raise NotImplementedError
+
+def project[V](data: dict[str, V], /) -> V | None: ...
+def pair[V](items: list[V], item: V, /) -> None: ...
+
+class Projection(Protocol):
+    def __call__[V](self, data: dict[str, V], /) -> V | None: ...
+
+def check(projection: Projection) -> None:
+    reveal_type(infer_positional(project))  # revealed: tuple[dict[str, Unknown]]
+    reveal_type(infer_positional(pair))  # revealed: tuple[list[Unknown], Unknown]
+    reveal_type(infer_positional(projection))  # revealed: tuple[dict[str, Unknown]]
+```
+
+The inferred length is preserved when the `TypeVarTuple` is then used to describe another callable,
+such as in a decorator factory.
+
+```py
+from typing import Any, Callable, Protocol
+
+class Projection(Protocol):
+    def __call__[V](self, data: dict[str, V], /) -> V | None: ...
+
+def getitem(name: str) -> Projection:
+    raise NotImplementedError
+
+def tracked[S, *Ts](
+    key: Callable[[*Ts], object],
+) -> Callable[[Callable[[S, *Ts], None]], Callable[[S, *Ts], None]]:
+    raise NotImplementedError
+
+class Handlers:
+    @tracked(getitem("app_id"))
+    def deploy(self, data: dict[str, Any]) -> None: ...  # ok
+
+    # error: [invalid-argument-type] "Expected `(Unknown, dict[str, Unknown], /) -> None`, found `def wrong_type(self, data: int) -> None`"
+    @tracked(getitem("app_id"))
+    def wrong_type(self, data: int) -> None: ...
+
+    # error: [invalid-argument-type] "Expected `(Unknown, dict[str, Unknown], /) -> None`, found `def extra_parameter(self, data: dict[str, Any], extra: str) -> None`"
+    @tracked(getitem("app_id"))
+    def extra_parameter(self, data: dict[str, Any], extra: str) -> None: ...
+```
+
 ### Callable protocol inference
 
 `Callable[[*Ts], R]` can only describe positional-only parameters. Callable protocols are used below
